@@ -1,0 +1,16 @@
+# Binari ed eseguibili
+app
+*.so
+*.signed.so
+*.o
+
+# File ponte autogenerati dall'Edger8r di SGX
+node/enclave_u.c
+node/enclave_u.h
+enclave/enclave_t.c
+enclave/enclave_t.h
+
+# File di configurazione o temporanei degli IDE
+.vscode/
+.idea/
+*.swp

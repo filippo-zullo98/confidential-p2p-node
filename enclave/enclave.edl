@@ -1,0 +1,16 @@
+enclave {
+    trusted {
+        /* ECALL: Chiamata dall'esterno (Go) verso l'interno dell'Enclave (C) */
+        /* Riceve il blocco di dati in chiaro, lo cifra e restituisce il ciphertext */
+        public void ecall_encrypt_block([in, size=len] const char* plaintext, size_t len, [out, size=len] char* ciphertext);
+        
+        /* Riceve il blocco cifrato e lo decifra all'interno della memoria EPC */
+        public void ecall_decrypt_block([in, size=len] const char* ciphertext, size_t len, [out, size=len] char* plaintext); 
+    };
+    
+    untrusted {
+        /* OCALL: Chiamate dall'enclave verso il Sistema Operativo (fuori dalla RAM protetta) */
+        /* Esempio: un log di debug stampato sul terminale dell'host */
+        void ocall_print_string([in, string] const char* str); 
+    };
+};
