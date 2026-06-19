@@ -1,16 +1,39 @@
+/*
+ * DEFINIZIONE DELL'ENCLAVE
+ * Questo file viene letto dal tool 'sgx_edger8r' per generare il codice di "colla"
+ * (Proxy e Bridge) che permette all'Host e all'Enclave di parlarsi in sicurezza.
+ */
 enclave {
-    trusted {
-        /* ECALL: Chiamata dall'esterno (Go) verso l'interno dell'Enclave (C) */
-        /* Riceve il blocco di dati in chiaro, lo cifra e restituisce il ciphertext */
-        public void ecall_encrypt_block([in, size=len] const char* plaintext, size_t len, [out, size=len] char* ciphertext);
-        
-        /* Riceve il blocco cifrato e lo decifra all'interno della memoria EPC */
-        public void ecall_decrypt_block([in, size=len] const char* ciphertext, size_t len, [out, size=len] char* plaintext); 
-    };
     
+    /* * BLOCCO TRUSTED (Le ECALL - Enclave Calls)
+     * Funzioni scritte dentro l'enclave che l'Host ha il permesso di chiamare.
+     * Quando l'Host le chiama, la CPU esegue uno "switch" hardware in modalità protetta.
+     */
+    trusted {
+        /*
+         * public: rende la funzione invocabile direttamente dall'Host nel main.c.
+         * [in]: l'hardware copia i dati dall'Host all'Enclave prima di eseguire la funzione.
+         * [out]: l'hardware copia i dati dall'Enclave all'Host al termine della funzione.
+         * size=len: impedisce attacchi di Buffer Overflow; la CPU sa esattamente quanti byte copiare.
+         */
+        public void ecall_encrypt_block([in, size=len] const char* plaintext, 
+                                        size_t len, 
+                                        [out, size=len] char* ciphertext);
+                                        
+        public void ecall_decrypt_block([in, size=len] const char* ciphertext, 
+                                        size_t len, 
+                                        [out, size=len] char* decryptedtext);
+    };
+
+    /* * BLOCCO UNTRUSTED (Le OCALL - Outbound Calls)
+     * Funzioni che risiedono nell'Host (spazio non sicuro) che l'Enclave può chiamare.
+     * Servono perché l'Enclave, essendo isolata, non può interagire con l'OS (niente I/O, file, ecc.).
+     */
     untrusted {
-        /* OCALL: Chiamate dall'enclave verso il Sistema Operativo (fuori dalla RAM protetta) */
-        /* Esempio: un log di debug stampato sul terminale dell'host */
-        void ocall_print_string([in, string] const char* str); 
+        /*
+         * [in, string]: dice alla CPU di copiare la stringa C (fino al carattere '\0')
+         * dall'enclave all'Host in modo che l'Host possa leggerla e passarla alla printf.
+         */
+        void ocall_print_string([in, string] const char* str);
     };
 };
