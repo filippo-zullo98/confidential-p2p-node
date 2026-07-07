@@ -1,39 +1,30 @@
-/*
- * DEFINIZIONE DELL'ENCLAVE
- * Questo file viene letto dal tool 'sgx_edger8r' per generare il codice di "colla"
- * (Proxy e Bridge) che permette all'Host e all'Enclave di parlarsi in sicurezza.
- */
 enclave {
-    
-    /* * BLOCCO TRUSTED (Le ECALL - Enclave Calls)
-     * Funzioni scritte dentro l'enclave che l'Host ha il permesso di chiamare.
-     * Quando l'Host le chiama, la CPU esegue uno "switch" hardware in modalità protetta.
-     */
+    include "sgx_tcrypto.h"
+
     trusted {
-        /*
-         * public: rende la funzione invocabile direttamente dall'Host nel main.c.
-         * [in]: l'hardware copia i dati dall'Host all'Enclave prima di eseguire la funzione.
-         * [out]: l'hardware copia i dati dall'Enclave all'Host al termine della funzione.
-         * size=len: impedisce attacchi di Buffer Overflow; la CPU sa esattamente quanti byte copiare.
+        /* * ECDH Key Exchange Module
+         * Generates a local keypair and returns the public key to the host.
          */
-        public void ecall_encrypt_block([in, size=len] const char* plaintext, 
-                                        size_t len, 
-                                        [out, size=len] char* ciphertext);
-                                        
-        public void ecall_decrypt_block([in, size=len] const char* ciphertext, 
-                                        size_t len, 
-                                        [out, size=len] char* decryptedtext);
+        public void ecall_ecdh_generate_keypair([out] sgx_ec256_public_t* out_pub_key);
+
+        /* * Ingests the remote peer's public key and computes the ECDH shared secret.
+         * The secret never leaves the enclave boundary.
+         */
+        public void ecall_ecdh_derive_shared_secret([in] const sgx_ec256_public_t* remote_pub_key);
+
+        /* * Core P2P AES-GCM Telemetry 
+         */
+        public void ecall_encrypt_payload([in, string] const char* plaintext, 
+                                          [out, size=ciphertext_max_len] char* ciphertext_buffer, 
+                                          size_t ciphertext_max_len, 
+                                          [out] size_t* actual_ciphertext_len);
+        
+        public void ecall_decrypt_payload([in, size=ciphertext_len] const char* ciphertext_buffer, 
+                                          size_t ciphertext_len);
     };
 
-    /* * BLOCCO UNTRUSTED (Le OCALL - Outbound Calls)
-     * Funzioni che risiedono nell'Host (spazio non sicuro) che l'Enclave può chiamare.
-     * Servono perché l'Enclave, essendo isolata, non può interagire con l'OS (niente I/O, file, ecc.).
-     */
     untrusted {
-        /*
-         * [in, string]: dice alla CPU di copiare la stringa C (fino al carattere '\0')
-         * dall'enclave all'Host in modo che l'Host possa leggerla e passarla alla printf.
-         */
-        void ocall_print_string([in, string] const char* str);
+        /* Standard Host logging proxy */
+        void ocall_print_string([in, string] const char *str);
     };
 };

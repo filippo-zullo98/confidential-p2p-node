@@ -1,86 +1,185 @@
-#include "enclave_t.h"    // Header generato automaticamente dal compilatore EDL (lato trusted)
-#include "sgx_tcrypto.h"  // Libreria crittografica fidata di Intel SGX (sostituisce OpenSSL/glibc)
+#include "enclave_t.h"
+#include "sgx_tcrypto.h"
+#include "sgx_trts.h"
 #include <string.h>
+#include <stdlib.h>
+
+/* * Global Enclave State for Cryptographic Session 
+ * These variables reside ONLY in isolated EPC memory.
+ */
+static sgx_ec256_private_t g_priv_key;           // Our ephemeral private key
+static sgx_aes_gcm_128bit_key_t g_session_key;   // The derived AES-128 session key
+static int g_is_session_key_set = 0;             // State lock flag
 
 /*
- * CHIAVE CRITTOGRAFICA DI SESSIONE (Simulata)
- * In una vera architettura Zero-Trust orientata alla rete P2P (stile Careful Whisper),
- * questa chiave AES a 128 bit (16 byte) NON è scritta fissa nel codice (hardcoded),
- * ma viene iniettata dinamicamente dentro la CPU solo DOPO che il nodo ha superato
- * con successo il processo di Attestazione Remota con gli altri peer della rete.
+ * ECALL: ecall_ecdh_generate_keypair
+ * Instantiates an ECC context and generates a NIST P-256 keypair.
+ * The private key is kept globally inside the enclave, the public key is exported.
  */
-static const sgx_aes_gcm_128bit_key_t p2p_session_key = {
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    0x09, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16
-};
+void ecall_ecdh_generate_keypair(sgx_ec256_public_t* out_pub_key) {
+    if (out_pub_key == NULL) {
+        ocall_print_string("[Enclave Error] Null pointer for public key export.\n");
+        return;
+    }
 
-/*
- * IMPLEMENTAZIONE DELLA ECALL DI CIFRATURA
- * Questa funzione riceve il dato copiato in modo sicuro dall'hardware dentro la EPC.
- */
-void ecall_encrypt_block(const char* plaintext, size_t len, char* ciphertext) {
-    
-    // Invochiamo la OCALL per fare un log all'esterno nell'Host.
-    // Ricorda: la "printf" qui dentro è vietata, quindi deleghiamo l'Host.
-    ocall_print_string("[ENCLAVE] Hardware encryption started...\n");
+    sgx_ecc_state_handle_t ecc_context;
+    sgx_status_t status;
 
-    /*
-     * SCELTA ARCHITETTURALE: AES-CTR (Counter Mode)
-     * Per il Data Plane di una rete P2P usiamo la modalità CTR perché:
-     * 1. Non richiede Padding (il ciphertext ha la stessa identica lunghezza del plaintext).
-     * 2. Permette il parallelismo hardware (accelerazione tramite istruzioni AES-NI della CPU).
-     */
-    
-    // Il contatore (IV / Nonce) a 16 byte per la modalità CTR.
-    // Deve essere sincrono tra chi cifra e chi decifra.
-    uint8_t ctr[16] = {0}; 
+    // 1. Open ECC Context
+    status = sgx_ecc256_open_context(&ecc_context);
+    if (status != SGX_SUCCESS) {
+        ocall_print_string("[Enclave Error] Failed to open hardware ECC context.\n");
+        return;
+    }
 
-    /*
-     * Chiamata alla funzione crittografica hardware nativa di Intel SGX.
-     * Parametri:
-     * - &p2p_session_key: Puntatore alla chiave segreta custodita in RAM EPC.
-     * - (const uint8_t*)plaintext: Il testo in chiaro (già copiato nella memoria fidata).
-     * - (uint32_t)len: Lunghezza del blocco.
-     * - ctr: Il vettore/contatore.
-     * - 128: Gli bit del contatore da incrementare (tutto il blocco).
-     * - (uint8_t*)ciphertext: Il buffer di destinazione in cui la CPU scriverà il risultato cifrato.
-     */
-    sgx_aes_ctr_encrypt(&p2p_session_key, 
-                        (const uint8_t*)plaintext, 
-                        (uint32_t)len, 
-                        ctr, 
-                        128, 
-                        (uint8_t*)ciphertext);
+    // 2. Generate Keypair using hardware TRNG entropy
+    status = sgx_ecc256_create_key_pair(&g_priv_key, out_pub_key, ecc_context);
+    if (status != SGX_SUCCESS) {
+        ocall_print_string("[Enclave Error] ECDH Keypair generation failed.\n");
+        sgx_ecc256_close_context(ecc_context);
+        return;
+    }
 
-    ocall_print_string("[ENCLAVE] Encryption completed successfully inside the CPU.\n");
+    // 3. Clean up context
+    sgx_ecc256_close_context(ecc_context);
+    ocall_print_string("[Enclave] Ephemeral ECDH Keypair successfully generated. Public Key exported.\n");
 }
 
 /*
- * IMPLEMENTAZIONE DELLA ECALL DI DECIFRATURA
- * Sfrutta la natura simmetrica di AES-CTR.
+ * ECALL: ecall_ecdh_derive_shared_secret
+ * Computes the DH shared secret using our private key and the remote peer's public key.
+ * Derives a 128-bit AES-GCM key via SHA-256 hashing (KDF).
  */
-void ecall_decrypt_block(const char* ciphertext, size_t len, char* decryptedtext) {
+void ecall_ecdh_derive_shared_secret(const sgx_ec256_public_t* remote_pub_key) {
+    if (remote_pub_key == NULL) {
+        ocall_print_string("[Enclave Error] Null pointer for remote public key.\n");
+        return;
+    }
+
+    sgx_ecc_state_handle_t ecc_context;
+    sgx_ec256_dh_shared_t shared_secret;
+    sgx_status_t status;
+
+    status = sgx_ecc256_open_context(&ecc_context);
+    if (status != SGX_SUCCESS) return;
+
+    // 1. Compute the raw DH Shared Secret (Mathematical intersection)
+    status = sgx_ecc256_compute_shared_dhkey(&g_priv_key, (sgx_ec256_public_t*)remote_pub_key, &shared_secret, ecc_context);
+    sgx_ecc256_close_context(ecc_context);
+
+    if (status != SGX_SUCCESS) {
+        ocall_print_string("[Enclave Error] Failed to compute DH shared secret. Curve point mismatch?\n");
+        return;
+    }
+
+    // 2. Key Derivation Function (KDF): Hash the shared secret using SHA-256
+    sgx_sha256_hash_t hash_output;
+    status = sgx_sha256_msg((const uint8_t*)&shared_secret, sizeof(sgx_ec256_dh_shared_t), &hash_output);
     
-    ocall_print_string("[ENCLAVE] Hardware decryption started...\n");
+    if (status != SGX_SUCCESS) {
+        ocall_print_string("[Enclave Error] SHA-256 Key Derivation failed.\n");
+        return;
+    }
 
-    // Re-inizializziamo lo stesso identico contatore usato per cifrare
-    uint8_t ctr[16] = {0};
+    // 3. Truncate SHA-256 (32 bytes) to AES-128 (16 bytes) and lock the state
+    memcpy(&g_session_key, &hash_output, sizeof(sgx_aes_gcm_128bit_key_t));
+    g_is_session_key_set = 1;
 
-    /*
-     * Nota di sicurezza: In modalità AES-CTR, l'operazione di decifratura 
-     * sotto il cofano è matematicamente identica alla cifratura (è uno XOR con il keystream).
-     * Per questo motivo l'SDK di Intel SGX mappa entrambe le operazioni 
-     * sotto la stessa funzione 'sgx_aes_ctr_encrypt'.
-     */
-    sgx_aes_ctr_encrypt(&p2p_session_key, 
-                        (const uint8_t*)ciphertext, 
-                        (uint32_t)len, 
-                        ctr, 
-                        128, 
-                        (uint8_t*)decryptedtext);
+    // 4. Scrub the raw shared secret and full hash from memory to prevent leakage
+    memset(&shared_secret, 0, sizeof(sgx_ec256_dh_shared_t));
+    memset(&hash_output, 0, sizeof(sgx_sha256_hash_t));
 
-    // Ora 'decryptedtext' contiene il dato in chiaro, ma è ancora dentro l'enclave.
-    // Appena questa funzione finisce, l'hardware prenderà questo blocco di memoria EPC
-    // e lo copierà nel buffer dell'Host (per via del tag [out] definito nell'EDL).
-    ocall_print_string("[ENCLAVE] Decryption completed. Data is about to be exposed to the Host.\n");
+    ocall_print_string("[Enclave] ECDH Handshake complete. AES-128 Session Key derived and locked safely.\n");
+}
+
+/*
+ * ECALL: ecall_encrypt_payload (Updated for Dynamic Key)
+ */
+void ecall_encrypt_payload(const char* plaintext, char* ciphertext_buffer, size_t ciphertext_max_len, size_t* actual_ciphertext_len) {
+    if (!g_is_session_key_set) {
+        ocall_print_string("[Enclave Error] Cannot encrypt. ECDH session key is not derived yet!\n");
+        *actual_ciphertext_len = 0;
+        return;
+    }
+
+    if (plaintext == NULL || ciphertext_buffer == NULL || actual_ciphertext_len == NULL) return;
+
+    uint32_t plaintext_len = (uint32_t)strlen(plaintext);
+    uint32_t expected_total_len = SGX_AESGCM_IV_SIZE + SGX_AESGCM_MAC_SIZE + plaintext_len;
+
+    if (ciphertext_max_len < expected_total_len) {
+        *actual_ciphertext_len = 0;
+        return;
+    }
+
+    uint8_t* p_iv  = (uint8_t*)ciphertext_buffer;
+    uint8_t* p_tag = (uint8_t*)(ciphertext_buffer + SGX_AESGCM_IV_SIZE);
+    uint8_t* p_crt = (uint8_t*)(ciphertext_buffer + SGX_AESGCM_IV_SIZE + SGX_AESGCM_MAC_SIZE);
+
+    if (sgx_read_rand(p_iv, SGX_AESGCM_IV_SIZE) != SGX_SUCCESS) {
+        ocall_print_string("[Enclave Error] TRNG failure.\n");
+        *actual_ciphertext_len = 0;
+        return;
+    }     
+
+    // Use the dynamically derived g_session_key
+    sgx_status_t status = sgx_rijndael128GCM_encrypt(
+        &g_session_key,
+        (const uint8_t*)plaintext, plaintext_len,
+        p_crt,
+        p_iv, SGX_AESGCM_IV_SIZE,
+        NULL, 0,
+        (sgx_aes_gcm_128bit_tag_t*)p_tag
+    );
+
+    if (status != SGX_SUCCESS) {
+        *actual_ciphertext_len = 0;
+        return;
+    }
+
+    *actual_ciphertext_len = (size_t)expected_total_len;
+}
+
+/*
+ * ECALL: ecall_decrypt_payload (Updated for Dynamic Key)
+ */
+void ecall_decrypt_payload(const char* ciphertext_buffer, size_t ciphertext_len) {
+    if (!g_is_session_key_set) {
+        ocall_print_string("[Enclave Error] Cannot decrypt. ECDH session key is not derived yet!\n");
+        return;
+    }
+
+    if (ciphertext_buffer == NULL || ciphertext_len <= (SGX_AESGCM_IV_SIZE + SGX_AESGCM_MAC_SIZE)) return;
+
+    uint32_t plaintext_len = (uint32_t)(ciphertext_len - SGX_AESGCM_IV_SIZE - SGX_AESGCM_MAC_SIZE);
+    char* decrypted_plaintext = (char*)malloc(plaintext_len + 1);
+    if (decrypted_plaintext == NULL) return;
+
+    const uint8_t* p_iv  = (const uint8_t*)ciphertext_buffer;
+    const uint8_t* p_tag = (const uint8_t*)(ciphertext_buffer + SGX_AESGCM_IV_SIZE);
+    const uint8_t* p_crt = (const uint8_t*)(ciphertext_buffer + SGX_AESGCM_IV_SIZE + SGX_AESGCM_MAC_SIZE);
+
+    // Use the dynamically derived g_session_key
+    sgx_status_t status = sgx_rijndael128GCM_decrypt(
+        &g_session_key,
+        p_crt, plaintext_len,
+        (uint8_t*)decrypted_plaintext,
+        p_iv, SGX_AESGCM_IV_SIZE,
+        NULL, 0,
+        (const sgx_aes_gcm_128bit_tag_t*)p_tag
+    );
+
+    if (status != SGX_SUCCESS) {
+        ocall_print_string("[CRITICAL ATTACK DETECTED] MAC validation failed!\n");
+        free(decrypted_plaintext);
+        return;
+    }
+
+    decrypted_plaintext[plaintext_len] = '\0';
+    ocall_print_string("[Enclave] Secure Payload: ");
+    ocall_print_string(decrypted_plaintext);
+    ocall_print_string("\n");
+
+    memset(decrypted_plaintext, 0, plaintext_len);
+    free(decrypted_plaintext);
 }
