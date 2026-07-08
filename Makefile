@@ -40,8 +40,6 @@ endif
 all: app enclave.signed.so
 
 ######## Bridge Files Generation via Edger8r ########
-# Crucial: This target now generates BOTH untrusted and trusted bridge files 
-# before any compilation rule takes place.
 node/enclave_u.c node/enclave_u.h enclave/enclave_t.c enclave/enclave_t.h: enclave/enclave.edl
 	@mkdir -p node
 	@$(SGX_EDGER8R) --untrusted enclave/enclave.edl --search-path $(SGX_SDK)/include --untrusted-dir node
@@ -52,23 +50,28 @@ node/enclave_u.c node/enclave_u.h enclave/enclave_t.c enclave/enclave_t.h: encla
 node/enclave_u.o: node/enclave_u.c
 	@$(CC) $(App_C_Flags) -c $< -o $@
 
-node/main.o: node/main.c node/enclave_u.h
+# NEW: Compilation rule for the new P2P Network Module
+node/p2p_network.o: node/p2p_network.c node/p2p_network.h node/enclave_u.h
 	@$(CC) $(App_C_Flags) -c $< -o $@
 
-app: node/enclave_u.o node/main.o
+node/main.o: node/main.c node/enclave_u.h node/p2p_network.h
+	@$(CC) $(App_C_Flags) -c $< -o $@
+
+# UPDATED: Added node/p2p_network.o as a mandatory dependency for the app executable
+app: node/enclave_u.o node/main.o node/p2p_network.o
 	@$(CC) $^ -o $@ $(App_Link_Flags)
 	@echo "-> Host executable compiled successfully: app"
 
 ######## Enclave Compilation and Signing ########
-# We enforce that enclave_t.h must exist before calling the inner Makefile
 enclave.signed.so: enclave/enclave_t.c enclave/enclave_t.h
 	@$(MAKE) -C enclave SGX_DEBUG=$(SGX_DEBUG) SGX_MODE=$(SGX_MODE)
 	@cp enclave/enclave.signed.so .
 	@echo "-> Enclave compiled and signed successfully!"
 
 ######## Cleanup ########
+# UPDATED: Added node/p2p_network.o to the cleaning list
 clean:
 	@$(MAKE) -C enclave clean
-	@rm -f app node/main.o node/enclave_u.o node/enclave_u.c node/enclave_u.h
+	@rm -f app node/main.o node/p2p_network.o node/enclave_u.o node/enclave_u.c node/enclave_u.h
 	@rm -f enclave/enclave_t.c enclave/enclave_t.h enclave.signed.so
 	@echo "Cleanup completed successfully."
