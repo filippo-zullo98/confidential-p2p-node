@@ -1,91 +1,84 @@
+version: '3.8'
+
+services:
+  node_a:
+    build: .
+    container_name: node_a
+    networks:
+      p2p_network:
+        ipv4_address: 172.20.0.10
+    tty: true
+    stdin_open: true
+    ports:
+      - "8080:8080"
+    command: ["--port", "8080"]
+
+  node_b:
+    build: .
+    container_name: node_b
+    networks:
+      p2p_network:
+        ipv4_address: 172.20.0.11
+    tty: true
+    stdin_open: true
+    ports:
+      - "8081:8080"
+    command: ["--port", "8080"]
+
+  node_c:
+    build: .
+    container_name: node_c
+    networks:
+      p2p_network:
+        ipv4_address: 172.20.0.12
+    tty: true
+    stdin_open: true
+    ports:
+      - "8082:8080"
+    command: ["--port", "8080"]
+    # Configurato come nodo malizioso per il test Zero-Trust
+    environment:
+      - NODE_BEHAVIOR=MALICIOUS
+
+  node_d:
+    build: .
+    container_name: node_d
+    networks:
+      p2p_network:
+        ipv4_address: 172.20.0.13
+    tty: true
+    stdin_open: true
+    ports:
+      - "8083:8080"
+    command: ["--port", "8080"]
+
+  node_e:
+    build: .
+    container_name: node_e
+    networks:
+      p2p_network:
+        ipv4_address: 172.20.0.14
+    tty: true
+    stdin_open: true
+    ports:
+      - "8084:8080"
+    command: ["--port", "8080"]
+
+  node_g:
+    build: .
+    container_name: node_g
+    networks:
+      p2p_network:
+        ipv4_address: 172.20.0.16
+    tty: true
+    stdin_open: true
+    ports:
+      - "8086:8080"
+    command: ["--port", "8080"]
+
 networks:
-  p2p_mesh:
+  p2p_network:
     driver: bridge
     ipam:
       config:
         - subnet: 172.20.0.0/16
-
-services:
-  nodo_alpha:
-    build: .
-    container_name: nodo_alpha
-    networks:
-      p2p_mesh:
-        ipv4_address: 172.20.0.10
-    ports:
-      - "8080:8080"
-    command: ["--port", "8080"]
-    stdin_open: true
-    tty: true
-
-  nodo_bravo:
-    build: .
-    container_name: nodo_bravo
-    networks:
-      p2p_mesh:
-        ipv4_address: 172.20.0.11
-    ports:
-      - "8081:8081"
-    command: ["--port", "8081"]
-    stdin_open: true
-    tty: true
-
-  nodo_charlie:
-    build: .
-    container_name: nodo_charlie
-    networks:
-      p2p_mesh:
-        ipv4_address: 172.20.0.12
-    ports:
-      - "8082:8082"
-    command: ["--port", "8082"]
-    stdin_open: true
-    tty: true
-
-  nodo_delta:
-    build: .
-    container_name: nodo_delta
-    networks:
-      p2p_mesh:
-        ipv4_address: 172.20.0.13
-    ports:
-      - "8083:8083"
-    command: ["--port", "8083"]
-    stdin_open: true
-    tty: true
-
-  nodo_echo:
-    build: .
-    container_name: nodo_echo
-    networks:
-      p2p_mesh:
-        ipv4_address: 172.20.0.14
-    ports:
-      - "8084:8084"
-    command: ["--port", "8084"]
-    stdin_open: true
-    tty: true
-
-  nodo_foxtrot:
-    build: .
-    container_name: nodo_foxtrot
-    networks:
-      p2p_mesh:
-        ipv4_address: 172.20.0.15
-    ports:
-      - "8085:8085"
-    command: ["--port", "8085"]
-    stdin_open: true
-    tty: true
-
-  nodo_golf:
-    build: .
-    container_name: nodo_golf
-    networks:
-      p2p_mesh:
-        ipv4_address: 172.20.0.16
-    ports:
-      - "8086:8086"
-    command: ["--port", "8086"]
-    stdin_open: true
-    tty: true
