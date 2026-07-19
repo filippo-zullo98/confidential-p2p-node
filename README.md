@@ -49,13 +49,14 @@ The network is orchestrated using Docker Compose, creating an isolated custom br
 
 ```bash
 # Clone the repository
-git clone [https://github.com/filippo-zullo98/confidential-p2p-node.git](https://github.com/filippo-zullo98/confidential-p2p-node.git)
+git clone https://github.com/filippo-zullo98/confidential-p2p-node.git
 cd confidential-p2p-node
 
 # Build and start the fleet in detached mode
 docker compose up -d --build
 ```
-## 🗡️ Reproducing the Insider Attack
+
+## Reproducing the Insider Attack
 
 To empirically validate the Zero-Trust architecture, follow these steps to simulate the attack:
 
@@ -92,7 +93,7 @@ p2p-node> send 172.20.0.11 8080 Test_Attack
 
 ---
 
-## 👤 Author
+## Author
 
 **Filippo Zullo**
 *Computer Science Student – Università degli Studi di Bari*
