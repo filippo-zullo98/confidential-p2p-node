@@ -17,3 +17,4 @@ enclave/enclave_t.h
 *.swp
 enclave_private.pem
 */enclave_private.pem
+sgxsdk/
