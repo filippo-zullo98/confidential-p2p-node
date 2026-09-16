@@ -14,7 +14,7 @@ This project was developed as part of a Bachelor's Thesis in Computer Science to
 
 ## Technologies & Stack
 
-* **Language:** C / C++
+* **Language:** C 
 * **Confidential Computing:** Intel SGX SDK (ECALLs / OCALLs, Edger8r)
 * **Cryptography:** OpenSSL (Intel SGX SSL / Crypto API)
 * **Infrastructure:** Docker, Docker Compose
@@ -34,3 +34,29 @@ To build and run the simulation, the host machine must support Intel SGX (Hardwa
    ```bash
    git clone [https://github.com/filippo-zullo98/confidential-p2p-node.git](https://github.com/filippo-zullo98/confidential-p2p-node.git)
    cd confidential-p2p-node
+   ```
+2. **Build the project:** The Makefile is configured to automatically generate the RSA private key (enclave_private.pem) required to sign the enclave if it is not present.
+   ```bash
+   make
+   ```
+## Running the simulation 
+The project includes a Docker Compose configuration to spin up the P2P network and simulate the Insider Threat scenario:
+  ```bash
+  # Build the Docker images and start the network in detached mode
+  docker-compose up --build -d
+      
+  # View the logs to observe the SGX enclave detecting and dropping unsigned packets
+  docker-compose logs -f
+  ```
+## Repository Structure
+- enclave/ - Trusted code executed inside the SGX enclave (cryptography, EDL file).
+
+- node/ - Untrusted application code handling socket connections and P2P routing.
+
+- docker-compose.yml - Network orchestration and threat simulation setup.
+
+- Makefile - Build instructions and automated enclave signing.
+
+## Author
+
+- Filippo Zullo - filippo-zullo98
