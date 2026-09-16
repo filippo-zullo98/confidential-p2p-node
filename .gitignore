@@ -15,3 +15,5 @@ enclave/enclave_t.h
 .vscode/
 .idea/
 *.swp
+enclave_private.pem
+*/enclave_private.pem
