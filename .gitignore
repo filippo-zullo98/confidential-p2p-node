@@ -18,3 +18,10 @@ enclave/enclave_t.h
 enclave_private.pem
 */enclave_private.pem
 sgxsdk/
+
+# Chiavi private / segreti
+3072
+id_rsa
+id_ed25519
+*.pem
+*.key
