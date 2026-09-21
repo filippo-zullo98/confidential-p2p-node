@@ -21,4 +21,13 @@ int start_p2p_listener(int port, pthread_t* thread_id);
  */
 void transmit_secure_message(const char* target_ip, int target_port, const char* plaintext_message);
 
+/*
+ * Insider Threat simulation: completes a REGULAR ECDH handshake (so the
+ * enclave derives a valid AES-GCM session key), then flips a single bit
+ * inside the resulting ciphertext before transmission. This exercises the
+ * receiver's sgx_rijndael128GCM_decrypt() authentication check, instead of
+ * merely failing the host's TCP framing checks.
+ */
+void transmit_tampered_message(const char* target_ip, int target_port, const char* plaintext_message);
+
 #endif // P2P_NETWORK_H

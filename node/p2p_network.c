@@ -174,3 +174,80 @@ void transmit_secure_message(const char* target_ip, int target_port, const char*
 
     close(client_fd);
 }
+
+/*
+ * Insider Threat simulation (corrected): unlike a peer that never completes
+ * the handshake, this attacker plays by the protocol rules up to the point
+ * of transmission, then corrupts the authenticated ciphertext in flight.
+ * This is what actually exercises the enclave's AES-GCM tag verification.
+ */
+void transmit_tampered_message(const char* target_ip, int target_port, const char* plaintext_message) {
+    int client_fd;
+    struct sockaddr_in address;
+
+    if ((client_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("[Malicious Client Error] Socket creation error");
+        return;
+    }
+
+    address.sin_family = AF_INET;
+    address.sin_port = htons(target_port);
+
+    if (inet_pton(AF_INET, target_ip, &address.sin_addr) <= 0) {
+        printf("[Malicious Client Error] Invalid IP address configuration.\n");
+        close(client_fd);
+        return;
+    }
+
+    if (connect(client_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+        perror("[Malicious Client Error] Connection to target node failed");
+        close(client_fd);
+        return;
+    }
+
+    printf("\n[MALICIOUS INTERCEPT] Insider threat active! Completing a REGULAR ECDH handshake to obtain a valid session key...\n");
+
+    sgx_ec256_public_t client_pub_key;
+    ecall_ecdh_generate_keypair(global_eid, &client_pub_key);
+
+    ssize_t bytes_sent = write(client_fd, &client_pub_key, sizeof(sgx_ec256_public_t));
+    if (bytes_sent != sizeof(sgx_ec256_public_t)) {
+        printf("[Malicious Client Error] Failed to transmit public key handshake packet.\n");
+        close(client_fd);
+        return;
+    }
+
+    sgx_ec256_public_t server_pub_key;
+    ssize_t bytes_read = read(client_fd, &server_pub_key, sizeof(sgx_ec256_public_t));
+    if (bytes_read != sizeof(sgx_ec256_public_t)) {
+        printf("[Malicious Client Error] Failed to receive remote public key response.\n");
+        close(client_fd);
+        return;
+    }
+    printf("[Host] Ingested Server ECDH Public Key response.\n");
+
+    ecall_ecdh_derive_shared_secret(global_eid, &server_pub_key);
+
+    char ciphertext_buffer[MAX_BUFFER_SIZE] = {0};
+    size_t actual_crypto_len = 0;
+    ecall_encrypt_payload(global_eid, plaintext_message, ciphertext_buffer, sizeof(ciphertext_buffer), &actual_crypto_len);
+
+    // Ciphertext layout produced by ecall_encrypt_payload: [IV | GCM TAG | CIPHERTEXT]
+    size_t tamper_offset = SGX_AESGCM_IV_SIZE + SGX_AESGCM_MAC_SIZE;
+    if (actual_crypto_len <= tamper_offset) {
+        printf("[Malicious Client Error] Encryption failed, nothing to tamper with.\n");
+        close(client_fd);
+        return;
+    }
+
+    // Flip a single bit strictly inside the encrypted body (past IV and MAC tag).
+    // Framing stays intact, so the receiver reaches ecall_decrypt_payload() and
+    // it is sgx_rijndael128GCM_decrypt()'s tag check that rejects the packet.
+    ciphertext_buffer[tamper_offset] ^= 0x01;
+    printf("[MALICIOUS INTERCEPT] Handshake completed with a valid session key. Flipping 1 bit inside the AES-GCM ciphertext (offset %zu) before transmission...\n", tamper_offset);
+
+    send(client_fd, ciphertext_buffer, actual_crypto_len, 0);
+    printf("[MALICIOUS INTERCEPT] Tampered AES-GCM stream (%ld bytes) successfully injected into the network mesh.\n", actual_crypto_len);
+
+    close(client_fd);
+}
