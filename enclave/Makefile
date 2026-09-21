@@ -23,6 +23,11 @@ Enclave_Link_Flags := -Wl,--no-undefined -nostdlib -nodefaultlibs -nostartfiles 
 # Il nuovo target finale che l'Host si aspetta
 all: enclave.signed.so
 
+# Genera automaticamente la chiave RSA-3072 (e=3) per la firma dell'enclave se assente
+enclave_private.pem:
+	@echo "-> Generating enclave signing key (3072-bit RSA, e=3)..."
+	@openssl genrsa -out enclave_private.pem -3 3072
+
 enclave.o: enclave.c
 	gcc -c enclave.c $(SGX_INCLUDE) -nostdinc -fvisibility=hidden -fpie -fstack-protector -o enclave.o
 
@@ -34,7 +39,7 @@ enclave.so: enclave.o enclave_t.o
 	gcc enclave.o enclave_t.o -o enclave.so $(Enclave_Link_Flags)
 
 # 4. Fase di FIRMA: genera l'hash e firma la libreria usando la chiave privata generata prima
-enclave.signed.so: enclave.so
+enclave.signed.so: enclave.so enclave_private.pem
 	$(SGX_SDK)/bin/x64/sgx_sign sign -key enclave_private.pem -enclave enclave.so -out enclave.signed.so
 
 clean:

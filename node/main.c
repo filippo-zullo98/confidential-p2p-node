@@ -43,7 +43,7 @@ int init_enclave(void) {
         printf("[Host Error] Failed to initialize SGX Enclave. Status Code: 0x%X\n", ret);
         return -1;
     }
-    printf("[Host] SGX Enclave initialized successfully. EID: %llu\n", global_eid);
+    printf("[Host] SGX Enclave initialized successfully. EID: %llu\n", (unsigned long long)global_eid);
     return 0;
 }
 
@@ -144,7 +144,7 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        if (sscanf(input_line, "%15s %63s %d %[^\n]", cmd, target_ip, &target_port, message) == 4) {
+        if (sscanf(input_line, "%15s %63s %d %1023[^\n]", cmd, target_ip, &target_port, message) == 4) {
             if (strcmp(cmd, "send") == 0) {
                 // Check if the attack toggle is active for this node instance
                 if (is_malicious) {
