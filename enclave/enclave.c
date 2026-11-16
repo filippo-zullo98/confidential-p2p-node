@@ -1,6 +1,7 @@
 #include "enclave_t.h"
 #include "sgx_tcrypto.h"
 #include "sgx_trts.h"
+#include "sgx_utils.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -183,3 +184,81 @@ void ecall_decrypt_payload(const char* ciphertext_buffer, size_t ciphertext_len)
     memset(decrypted_plaintext, 0, plaintext_len);
     free(decrypted_plaintext);
 }
+
+/*
+ * ECALL: ecall_generate_attestated_key
+ * Generates an ephemeral NIST P-256 keypair inside EPC memory and binds the
+ * 64-byte public key (X || Y) into the report_data field of an SGX Report.
+ */
+sgx_status_t ecall_generate_attestated_key(const sgx_target_info_t *p_qe_target_info, sgx_report_t *p_report) {
+    if (p_qe_target_info == NULL || p_report == NULL) {
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
+
+    sgx_status_t ret = SGX_SUCCESS;
+    sgx_ecc_state_handle_t ecc_handle = NULL;
+    sgx_ec256_public_t pub_key;
+    sgx_report_data_t report_data = {0};
+
+    // 1. Open hardware ECC context
+    ret = sgx_ecc256_open_context(&ecc_handle);
+    if (ret != SGX_SUCCESS) {
+        ocall_print_string("[Enclave Error] Failed to open ECC context for attestation.\n");
+        return ret;
+    }
+
+    // 2. Generate ephemeral keypair storing the private key in global EPC state (g_priv_key)
+    ret = sgx_ecc256_create_key_pair(&g_priv_key, &pub_key, ecc_handle);
+    if (ret != SGX_SUCCESS) {
+        ocall_print_string("[Enclave Error] Ephemeral keypair generation failed.\n");
+        sgx_ecc256_close_context(ecc_handle);
+        return ret;
+    }
+
+    // 3. Bind the 64-byte uncompressed public key (gx || gy) into report_data
+    memcpy(&report_data.d[0],  pub_key.gx, SGX_ECP256_KEY_SIZE);
+    memcpy(&report_data.d[32], pub_key.gy, SGX_ECP256_KEY_SIZE);
+
+    // 4. Invoke EREPORT via sgx_create_report to cryptographically bind pub_key to MRENCLAVE
+    ret = sgx_create_report(p_qe_target_info, &report_data, p_report);
+    if (ret == SGX_SUCCESS) {
+        ocall_print_string("[Enclave] Ephemeral ECDH key generated and bound to SGX Report.\n");
+    }
+
+    sgx_ecc256_close_context(ecc_handle);
+    return ret;
+}
+
+/*
+ * ECALL: ecall_verify_peer_report
+ * Validates an incoming peer's SGX Report by checking that its MRSIGNER and
+ * MRENCLAVE measurements match our trusted enclave identity policy.
+ */
+sgx_status_t ecall_verify_peer_report(const sgx_report_t *p_peer_report) {
+    if (p_peer_report == NULL) {
+        return SGX_ERROR_INVALID_PARAMETER;
+    }
+
+    // Retrieve our own enclave identity (MRENCLAVE & MRSIGNER) via self-report
+    sgx_report_t self_report;
+    sgx_status_t ret = sgx_create_report(NULL, NULL, &self_report);
+    if (ret != SGX_SUCCESS) {
+        return ret;
+    }
+
+    // Verify that the peer enclave was signed by the same trusted authority (MRSIGNER)
+    if (memcmp(&self_report.body.mr_signer, &p_peer_report->body.mr_signer, sizeof(sgx_measurement_t)) != 0) {
+        ocall_print_string("[Enclave Security Alert] Peer MRSIGNER mismatch! Untrusted binary.\n");
+        return SGX_ERROR_MAC_MISMATCH;
+    }
+
+    // Verify that the peer enclave executes the exact same approved binary code (MRENCLAVE)
+    if (memcmp(&self_report.body.mr_enclave, &p_peer_report->body.mr_enclave, sizeof(sgx_measurement_t)) != 0) {
+        ocall_print_string("[Enclave Security Alert] Peer MRENCLAVE mismatch! Code integrity violation.\n");
+        return SGX_ERROR_MAC_MISMATCH;
+    }
+
+    ocall_print_string("[Enclave] Peer MRENCLAVE and MRSIGNER verified against Zero-Trust policy.\n");
+    return SGX_SUCCESS;
+}
+

@@ -11,6 +11,7 @@
 // Enclave untrusted proxies
 #include "enclave_u.h"
 #include "sgx_tcrypto.h"
+#include "sgx_report.h"
 
 /*
  * Static context wrapper to pass arguments cleanly into the pthread worker
@@ -18,6 +19,29 @@
 typedef struct {
     int port;
 } server_config_t;
+
+/*
+ * Helper function to validate peer SGX Report inside the enclave and extract the 64-byte uncompressed NIST P-256 public key bound to report_data.
+ * */
+static int verify_and_extract_peer_key(const sgx_report_t* peer_report, sgx_ec256_public_t* extracted_pub_key) {
+	if (peer_report == NULL || extracted_pub_key == NULL) {
+		return -1;
+	}
+	
+	sgx_status_t ecall_ret = SGX_SUCCESS;
+	sgx_status_t status = ecall_verify_peer_report(global_eid, &ecall_ret, peer_report);
+
+	if (status != SGX_SUCCESS || ecall_ret != SGX_SUCCESS) {
+		printf("[Attestation Error] Peer SGX Report rejected (SGX: 0x%X, Enclave: 0x%X).\n", status, ecall_ret);
+		return -1;
+	}
+	
+	// Extract the 64-byte public key coordinates (X || Y) from report_data
+	memcpy(extracted_pub_key->gx, &peer_report->body.report_data.d[0], SGX_ECP256_KEY_SIZE);
+	memcpy(extracted_pub_key->gy, &peer_report->body.report_data.d[32], SGX_ECP256_KEY_SIZE);
+
+	return 0;
+}
 
 /*
  * Private thread worker for background listening
@@ -66,28 +90,49 @@ static void* server_worker_thread(void* arg) {
         }
 
         printf("\n\n--- [INCOMING P2P HANDSHAKE DETECTED] ---\n");
-
+	
+        // 1. Ingest incoming SGX Report from the initiating peer
+	sgx_report_t client_report;
+        ssize_t bytes_read = read(new_socket, &client_report, sizeof(sgx_report_t));
+        if (bytes_read != sizeof(sgx_report_t)) {
+            printf("[Server Error] Failed to read complete client SGX Report (%ld/%zu bytes).\n", bytes_read, sizeof(sgx_report_t));
+            close(new_socket);
+            continue;
+        }
+        printf("[Host] Ingested Client SGX Report (%ld bytes). Invoking attestation check...\n", bytes_read);
+	
+	// 2. Verify peer enclave measurements (MRENCLAVE/MRSIGNER) and extract bound public key
         sgx_ec256_public_t client_pub_key;
-        ssize_t bytes_read = read(new_socket, &client_pub_key, sizeof(sgx_ec256_public_t));
-        if (bytes_read != sizeof(sgx_ec256_public_t)) {
-            printf("[Server Error] Failed to read complete client public key block.\n");
+	if (verify_and_extract_peer_key(&client_report, &client_pub_key) != 0) {
+            puts("[Server Security Alert] Untrusted client report dropped!\n");
             close(new_socket);
             continue;
         }
-        printf("[Host] Ingested Client ECDH Public Key (%ld bytes).\n", bytes_read);
+        puts("[Host] Client attestation verified. Bound ECDH Public Key extracted");
 
-        sgx_ec256_public_t server_pub_key;
-        ecall_ecdh_generate_keypair(global_eid, &server_pub_key);
+        // 3. Generate server ephemeral keypair bound to local SGX Report
+	sgx_target_info_t qe_target_info = {0};
+	sgx_report_t server_report = {0};
+	sgx_status_t ecall_ret = SGX_SUCCESS;
 
-        ssize_t bytes_sent = write(new_socket, &server_pub_key, sizeof(sgx_ec256_public_t));
-        if (bytes_sent != sizeof(sgx_ec256_public_t)) {
-            printf("[Server Error] Failed to transmit server public key reply.\n");
-            close(new_socket);
-            continue;
-        }
-        printf("[Host] Transmitted Server ECDH Public Key back to Client.\n");
-
-        ecall_ecdh_derive_shared_secret(global_eid, &client_pub_key);
+	sgx_status_t status = ecall_generate_attestated_key(global_eid, &ecall_ret, &qe_target_info, &server_report);
+	if (status != SGX_SUCCESS || ecall_ret != SGX_SUCCESS) {
+		printf("[Server Error] Failed to generate attested server report (0x%X / 0x%X)\n", status, ecall_ret);
+		close(new_socket);
+		continue;
+	}     	
+	
+ 	// 4. Transmit server SGX Report back to client
+	size_t bytes_sent = write(new_socket, &server_report, sizeof(sgx_report_t));
+	if (bytes_sent != sizeof(sgx_report_t)){
+		puts("[Server Error] Failed to transmit server SGX Report reply.");
+		close(new_socket);
+		continue;
+	}	
+	printf("[Host] Transmitted Server SGX Report (%ld bytes) back to Client.\n", bytes_sent);
+	
+	// 5. Derive AES-128 session key and decrypt incoming payload
+	ecall_ecdh_derive_shared_secret(global_eid, &client_pub_key);
 
         memset(buffer, 0, MAX_BUFFER_SIZE);
         ssize_t valread = read(new_socket, buffer, MAX_BUFFER_SIZE);
@@ -129,7 +174,7 @@ void transmit_secure_message(const char* target_ip, int target_port, const char*
     address.sin_port = htons(target_port);
 
     if (inet_pton(AF_INET, target_ip, &address.sin_addr) <= 0) {
-        printf("[Client Error] Invalid IP address configuration.\n");
+        puts("[Client Error] Invalid IP address configuration.");
         close(client_fd);
         return;
     }
@@ -141,26 +186,46 @@ void transmit_secure_message(const char* target_ip, int target_port, const char*
     }
 
     printf("\n[Client] Initiating Perfect Forward Secrecy ECDH Handshake with %s:%d...\n", target_ip, target_port);
-
-    sgx_ec256_public_t client_pub_key;
-    ecall_ecdh_generate_keypair(global_eid, &client_pub_key);
-
-    ssize_t bytes_sent = write(client_fd, &client_pub_key, sizeof(sgx_ec256_public_t));
-    if (bytes_sent != sizeof(sgx_ec256_public_t)) {
-        printf("[Client Error] Failed to transmit public key handshake packet.\n");
+    
+    // 1. Generate client ephemeral keypair bound to local SGX Report
+    sgx_target_info_t qe_target_info = {0};
+    sgx_report_t client_report = {0};
+    sgx_status_t ecall_ret = SGX_SUCCESS;
+    
+    sgx_status_t status = ecall_generate_attestated_key(global_eid, &ecall_ret, &qe_target_info, &client_report);
+    if (status != SGX_SUCCESS || ecall_ret != SGX_SUCCESS) {
+    	printf("[Client Error] Failed to generate attested client report (0x%X / 0x%X).\n", status, ecall_ret);
+	close(client_fd);
+	return;
+    }
+ 
+    // 2. Transmit client SGX Report to target peer
+    ssize_t bytes_sent = write(client_fd, &client_report, sizeof(sgx_report_t));
+    if (bytes_sent != sizeof(sgx_report_t)) {
+        puts("[Client Error] Failed to transmit public key handshake packet.");
         close(client_fd);
         return;
     }
 
+    // 3. Receive and verify target peer's SGX Report 		    
+    sgx_report_t server_report;
+    ssize_t bytes_read = read(client_fd, &server_report, sizeof(sgx_report_t));
+    if (bytes_read != sizeof(sgx_report_t)) {
+        puts("[Client Error] Failed to receive remote SGX Report response");
+        close(client_fd);
+        return;
+    }
+    printf("[Host] Ingested Server SGX Report (%ld bytes). Invoking attestation check... \n", bytes_read);
+    
     sgx_ec256_public_t server_pub_key;
-    ssize_t bytes_read = read(client_fd, &server_pub_key, sizeof(sgx_ec256_public_t));
-    if (bytes_read != sizeof(sgx_ec256_public_t)) {
-        printf("[Client Error] Failed to receive remote public key response.\n");
-        close(client_fd);
-        return;
+    if (verify_and_extract_peer_key(&server_report, &server_pub_key) != 0) {
+    	puts("[Client Secuirty Alert] Server attestation failed! Aborting connection.");
+	close(client_fd);
+	return;
     }
-    printf("[Host] Ingested Server ECDH Public Key response.\n");
+    puts("[Host] Server attestation verified. Bound ECDH Public Key extracted.");
 
+    // 4. Derive shared secret and push AES-GCM encrypted payload    
     ecall_ecdh_derive_shared_secret(global_eid, &server_pub_key);
 
     char ciphertext_buffer[MAX_BUFFER_SIZE] = {0};
@@ -194,7 +259,7 @@ void transmit_tampered_message(const char* target_ip, int target_port, const cha
     address.sin_port = htons(target_port);
 
     if (inet_pton(AF_INET, target_ip, &address.sin_addr) <= 0) {
-        printf("[Malicious Client Error] Invalid IP address configuration.\n");
+        puts("[Malicious Client Error] Invalid IP address configuration.");
         close(client_fd);
         return;
     }
@@ -205,26 +270,41 @@ void transmit_tampered_message(const char* target_ip, int target_port, const cha
         return;
     }
 
-    printf("\n[MALICIOUS INTERCEPT] Insider threat active! Completing a REGULAR ECDH handshake to obtain a valid session key...\n");
+    puts("\n[MALICIOUS INTERCEPT] Insider threat active! Completing an ATTESTED ECDH handshake to obtain a valid session key...");
+    
+    sgx_target_info_t qe_target_info = {0};
+    sgx_report_t client_report = {0};
+    sgx_status_t ecall_ret = SGX_SUCCESS;    
+	
+    sgx_status_t status = ecall_generate_attestated_key(global_eid, &ecall_ret, &qe_target_info, &client_report);
+    if (status != SGX_SUCCESS || ecall_ret != SGX_SUCCESS) {
+    	puts("[Malicious Client Error] Failed to generate attestated report.");
+	close(client_fd);
+	return;
+    }
+	
+    ssize_t bytes_sent = write(client_fd, &client_report, sizeof(sgx_report_t));
+    
+    if (bytes_sent != sizeof(sgx_report_t)) {
+        puts("[Malicious Client Error] Failed to transmit SGX Report handshake packet.");
+        close(client_fd);
+        return;
+    }
 
-    sgx_ec256_public_t client_pub_key;
-    ecall_ecdh_generate_keypair(global_eid, &client_pub_key);
-
-    ssize_t bytes_sent = write(client_fd, &client_pub_key, sizeof(sgx_ec256_public_t));
-    if (bytes_sent != sizeof(sgx_ec256_public_t)) {
-        printf("[Malicious Client Error] Failed to transmit public key handshake packet.\n");
+    sgx_report_t server_report;
+    ssize_t bytes_read = read(client_fd, &server_report, sizeof(sgx_report_t));
+    if (bytes_read != sizeof(sgx_report_t)) {
+        puts("[Malicious Client Error] Failed to receive remote SGX Report response.");
         close(client_fd);
         return;
     }
 
     sgx_ec256_public_t server_pub_key;
-    ssize_t bytes_read = read(client_fd, &server_pub_key, sizeof(sgx_ec256_public_t));
-    if (bytes_read != sizeof(sgx_ec256_public_t)) {
-        printf("[Malicious Client Error] Failed to receive remote public key response.\n");
-        close(client_fd);
-        return;
+    if (verify_and_extract_peer_key(&server_report, &server_pub_key) != 0) {
+    	puts("[Malicious Client Error] Peer attestation check failed.");
+	close(client_fd);
+	return;
     }
-    printf("[Host] Ingested Server ECDH Public Key response.\n");
 
     ecall_ecdh_derive_shared_secret(global_eid, &server_pub_key);
 
@@ -241,8 +321,6 @@ void transmit_tampered_message(const char* target_ip, int target_port, const cha
     }
 
     // Flip a single bit strictly inside the encrypted body (past IV and MAC tag).
-    // Framing stays intact, so the receiver reaches ecall_decrypt_payload() and
-    // it is sgx_rijndael128GCM_decrypt()'s tag check that rejects the packet.
     ciphertext_buffer[tamper_offset] ^= 0x01;
     printf("[MALICIOUS INTERCEPT] Handshake completed with a valid session key. Flipping 1 bit inside the AES-GCM ciphertext (offset %zu) before transmission...\n", tamper_offset);
 
@@ -251,3 +329,5 @@ void transmit_tampered_message(const char* target_ip, int target_port, const cha
 
     close(client_fd);
 }
+
+

@@ -1,5 +1,6 @@
 enclave {
     include "sgx_tcrypto.h"
+    include "sgx_report.h"
 
     trusted {
         /* * ECDH Key Exchange Module
@@ -14,13 +15,16 @@ enclave {
 
         /* * Core P2P AES-GCM Telemetry 
          */
-        public void ecall_encrypt_payload([in, string] const char* plaintext, 
-                                          [out, size=ciphertext_max_len] char* ciphertext_buffer, 
-                                          size_t ciphertext_max_len, 
-                                          [out] size_t* actual_ciphertext_len);
+        public void ecall_encrypt_payload([in, string] const char* plaintext, [out, size=ciphertext_max_len] char* ciphertext_buffer, size_t ciphertext_max_len, [out] size_t* actual_ciphertext_len);
         
-        public void ecall_decrypt_payload([in, size=ciphertext_len] const char* ciphertext_buffer, 
-                                          size_t ciphertext_len);
+        public void ecall_decrypt_payload([in, size=ciphertext_len] const char* ciphertext_buffer, size_t ciphertext_len);
+	
+	/* * Remote Attestation Module: generates an ECDH keypair to an SGX Report
+	* and verifies incoming peer reports against expected enclave measurements. 
+	*/
+	public sgx_status_t ecall_generate_attestated_key([in] const sgx_target_info_t *p_qe_target_info, [out] sgx_report_t *p_report);
+	
+	public sgx_status_t ecall_verify_peer_report([in] const sgx_report_t *p_peer_report); 
     };
 
     untrusted {
