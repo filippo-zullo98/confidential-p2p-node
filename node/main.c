@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <limits.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
@@ -9,6 +11,8 @@
 #include "p2p_network.h"
 
 #define ENCLAVE_FILENAME "enclave.signed.so"
+#define BENCHMARK_ITERATIONS 1000
+#define BENCHMARK_CSV_PATH "benchmark_results.csv"
 
 // Define the global Enclave ID declared in the header
 sgx_enclave_id_t global_eid = 0;
@@ -24,6 +28,23 @@ void ocall_print_string(const char *str) {
         printf("%s", str);
         fflush(stdout);
     }
+}
+
+/*
+ * Strict TCP port parser (1..65535) using strtol
+ */
+static int parse_valid_port(const char *str, int *out_port) {
+    if (str == NULL || *str == '\0' || out_port == NULL) {
+        return -1;
+    }
+    char *endptr = NULL;
+    errno = 0;
+    long val = strtol(str, &endptr, 10);
+    if (errno != 0 || *endptr != '\0' || val < 1 || val > 65535) {
+        return -1;
+    }
+    *out_port = (int)val;
+    return 0;
 }
 
 /*
@@ -43,106 +64,151 @@ int init_enclave(void) {
     return 0;
 }
 
-void print_banner() {
+void print_banner(void) {
     puts("====================================================");
     puts("  ZERO-TRUST P2P NODE (SGX CONFIDENTIAL COMPUTING)  ");
     puts("====================================================");
     puts("Commands:");
-    puts("  send <IP> <PORT> <MESSAGE>   (e.g., send 127.0.0.1 8081 Hello!)");
-    puts("  quit                         (Shutdown node safely)");
+    puts("  send <IP> <PORT> <MESSAGE>     (Attested P2P send)");
+    puts("  tamper <IP> <PORT> <MESSAGE>   (1-bit flip test)");
+    puts("  benchmark                      (Run SGX profiling)");
+    puts("  quit                           (Shutdown node)");
     puts("====================================================");
 }
 
-int compare_doubles(const void *a, const void *b){
-	double diff = *(double *)a - *(double *)b;
-	if (diff < 0) 
-		return -1;
-	if (diff > 0)
-		return 1;
-	return 0;
+static int compare_doubles(const void *a, const void *b) {
+    double da = *(const double *)a;
+    double db = *(const double *)b;
+    if (da < db) return -1;
+    if (da > db) return 1;
+    return 0;
 }
 
-void run_crypto_benchmark(sgx_enclave_id_t eid) { 
-	int nit = 1000;
-	double *latencies = (double *)malloc(nit * sizeof(double));
-	if (latencies == NULL) {
-		perror("Perror");
-		return;
-	}
+static void print_stats_and_write_csv(
+    FILE *csv_fp,
+    const char *op_name,
+    size_t payload_bytes,
+    double *samples,
+    int count
+) {
+    if (count <= 0) return;
 
-	struct timespec start, end;
-	uint8_t test_payload[16] = "test_payload_16B";
-	char ciphertext_buffer[64] = {0};
-	size_t actual_crypto_len = 0;
-	sgx_status_t status;
-	
-	int success_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (csv_fp != NULL) {
+            fprintf(csv_fp, "%s,%zu,%d,%.4f\n", op_name, payload_bytes, i + 1, samples[i]);
+        }
+    }
 
-	printf("[Benchmark] Beginning of profilation for %d iterations of cryptographic ECALL\n", nit);
-	
-	for (int i = 0; i < nit; i++) {
-		// Clean the buffer for all iteration
-		memset(ciphertext_buffer, 0, sizeof(ciphertext_buffer));
-		actual_crypto_len = 0;
+    qsort(samples, (size_t)count, sizeof(double), compare_doubles);
 
-		// 1. Capture start time (with nanosecond precision)
-		clock_gettime(CLOCK_MONOTONIC, &start);
+    double min_val = samples[0];
+    double max_val = samples[count - 1];
+    double median_val = (count % 2 == 0)
+        ? (samples[count / 2 - 1] + samples[count / 2]) / 2.0
+        : samples[count / 2];
 
-		// 2. Run ONLY cryptographyc operation inside the ENCLAVE
-		sgx_status_t ecall_ret = SGX_SUCCESS;
-		status = ecall_encrypt_payload(eid, &ecall_ret, (const char*)test_payload, ciphertext_buffer, sizeof(ciphertext_buffer), &actual_crypto_len);		
-		
-		// 3. Capture the final timestamp
-		clock_gettime(CLOCK_MONOTONIC, &end);
+    printf(" %-24s | %6zu B | Median: %7.2f us | Min: %7.2f us | Max: %7.2f us\n",
+           op_name, payload_bytes, median_val, min_val, max_val);
+}
 
-		if (status != SGX_SUCCESS) {
-			printf("[Benchmark Debug] ECALL failed with SGX Status: 0x%X\n", status);
-			continue; // stop the iteration in case of anomalous error
-		}
-		
-		// Compute the delta in microseconds
-		double elapsed_us = (end.tv_sec - start.tv_sec) * 1e6 + (end.tv_nsec - start.tv_nsec) / 1e3;
-		latencies[success_count++] = elapsed_us;
-	}
+void run_crypto_benchmark(sgx_enclave_id_t eid) {
+    const size_t payload_sizes[] = {16, 64, 256, 1024};
+    const size_t num_sizes = sizeof(payload_sizes) / sizeof(payload_sizes[0]);
 
-	if (success_count == 0) {
-		puts("[Benchmark Error] no one operation has been successfully completed");
-		free(latencies);
-		return;
-	}
-	
-	// 4. Sorting the times for compute the median and the dispersion  
-	qsort(latencies, success_count, sizeof(double), compare_doubles);
+    double *latencies = (double *)malloc(BENCHMARK_ITERATIONS * sizeof(double));
+    if (latencies == NULL) {
+        perror("[Benchmark Error] malloc failed");
+        return;
+    }
 
-	double min_val = latencies[0];
-	double max_val = latencies[success_count - 1];
-	double median_val;
+    FILE *csv_fp = fopen(BENCHMARK_CSV_PATH, "w");
+    if (csv_fp != NULL) {
+        fprintf(csv_fp, "operation,payload_bytes,iteration,latency_us\n");
+    } else {
+        perror("[Benchmark Warning] Could not open CSV output file");
+    }
 
-	if (success_count % 2 == 0) {
-		median_val = (latencies[success_count / 2 - 1] + latencies[success_count / 2]) / 2.0;
-	}
-	else {
-		median_val = latencies[success_count / 2];
-	}
-	
-	puts("====================================================");
-        printf(" BENCHMARK RESULTS OF CRYPTOGRAPHIC INTEL SGX (%d iter)\n", success_count);
-    	puts("====================================================");
-    	printf(" - Median (Latency) : %.2f µs\n", median_val);
-    	printf(" - Min (Best case)  : %.2f µs\n", min_val);
-    	printf(" - Max (Worst)      : %.2f µs\n", max_val);
-    	puts("====================================================");
+    printf("\n[Benchmark] Starting profiling (%d iterations per metric)...\n", BENCHMARK_ITERATIONS);
+    puts("====================================================================================");
 
-	free(latencies);
+    struct timespec start, end;
+    sgx_status_t status = SGX_SUCCESS;
+    sgx_status_t ecall_ret = SGX_SUCCESS;
+
+    // 1. Measure full Attested ECDH Handshake latency (target_info + EREPORT + verify + KDF)
+    int hs_success = 0;
+    for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
+        sgx_target_info_t ti = {0};
+        sgx_report_t report = {0};
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+
+        status = ecall_get_target_info(eid, &ecall_ret, &ti);
+        if (status == SGX_SUCCESS && ecall_ret == SGX_SUCCESS) {
+            status = ecall_generate_attested_key(eid, &ecall_ret, &ti, &report);
+        }
+        if (status == SGX_SUCCESS && ecall_ret == SGX_SUCCESS) {
+            status = ecall_verify_and_derive(eid, &ecall_ret, &report);
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        if (status == SGX_SUCCESS && ecall_ret == SGX_SUCCESS) {
+            double elapsed_us = (end.tv_sec - start.tv_sec) * 1e6 + (end.tv_nsec - start.tv_nsec) / 1e3;
+            latencies[hs_success++] = elapsed_us;
+        }
+    }
+    print_stats_and_write_csv(csv_fp, "attested_handshake", 0, latencies, hs_success);
+
+    // 2. Measure AES-GCM encryption ECALL latency across multiple payload sizes
+    char ciphertext_buffer[2048];
+    for (size_t s = 0; s < num_sizes; s++) {
+        size_t p_len = payload_sizes[s];
+        char *test_payload = (char *)malloc(p_len + 1);
+        if (test_payload == NULL) continue;
+        memset(test_payload, 'A', p_len);
+        test_payload[p_len] = '\0';
+
+        int enc_success = 0;
+        for (int i = 0; i < BENCHMARK_ITERATIONS; i++) {
+            // Provision a fresh single-use ephemeral session key outside the timed window
+            sgx_target_info_t ti = {0};
+            sgx_report_t report = {0};
+            if (ecall_get_target_info(eid, &ecall_ret, &ti) != SGX_SUCCESS || ecall_ret != SGX_SUCCESS) continue;
+            if (ecall_generate_attested_key(eid, &ecall_ret, &ti, &report) != SGX_SUCCESS || ecall_ret != SGX_SUCCESS) continue;
+            if (ecall_verify_and_derive(eid, &ecall_ret, &report) != SGX_SUCCESS || ecall_ret != SGX_SUCCESS) continue;
+
+            memset(ciphertext_buffer, 0, sizeof(ciphertext_buffer));
+            size_t actual_crypto_len = 0;
+
+            clock_gettime(CLOCK_MONOTONIC, &start);
+            status = ecall_encrypt_payload(eid, &ecall_ret, test_payload, ciphertext_buffer, sizeof(ciphertext_buffer), &actual_crypto_len);
+            clock_gettime(CLOCK_MONOTONIC, &end);
+
+            if (status == SGX_SUCCESS && ecall_ret == SGX_SUCCESS && actual_crypto_len > 0) {
+                double elapsed_us = (end.tv_sec - start.tv_sec) * 1e6 + (end.tv_nsec - start.tv_nsec) / 1e3;
+                latencies[enc_success++] = elapsed_us;
+            }
+        }
+
+        print_stats_and_write_csv(csv_fp, "aes_gcm_encrypt", p_len, latencies, enc_success);
+        free(test_payload);
+    }
+
+    puts("====================================================================================");
+    if (csv_fp != NULL) {
+        fclose(csv_fp);
+        printf("[Benchmark] Raw samples exported to %s\n\n", BENCHMARK_CSV_PATH);
+    }
+    free(latencies);
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 3 || strcmp(argv[1], "--port") != 0) {
-        printf("Usage: %s --port <listening_port>\n", argv[0]);
+    int local_port = 0;
+    if (argc != 3 || strcmp(argv[1], "--port") != 0 || parse_valid_port(argv[2], &local_port) != 0) {
+        printf("Usage: %s --port <1-65535>\n", argv[0]);
         return EXIT_FAILURE;
     }
-
-    int local_port = atoi(argv[2]);
 
     // Check if Docker injected the malicious behavior rule via environment variables
     char *behavior = getenv("NODE_BEHAVIOR");
@@ -168,13 +234,12 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    usleep(100000); 
+    usleep(100000);
     print_banner();
 
     // 3. Interactive Command Loop
     char input_line[MAX_BUFFER_SIZE];
-    char cmd[16], target_ip[64], message[1024];
-    int target_port;
+    char cmd[16], target_ip[64], port_str[16], message[1024];
 
     while (1) {
         printf("p2p-node> ");
@@ -188,29 +253,33 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        if (sscanf(input_line, "%15s %63s %d %1023[^\n]", cmd, target_ip, &target_port, message) == 4) {
+        if (sscanf(input_line, "%15s %63s %15s %1023[^\n]", cmd, target_ip, port_str, message) == 4) {
+            int target_port = 0;
+            if (parse_valid_port(port_str, &target_port) != 0) {
+                printf("[Host Error] Invalid port '%s'. Must be in range 1-65535.\n", port_str);
+                continue;
+            }
+
             if (strcmp(cmd, "send") == 0) {
-                // Check if the attack toggle is active for this node instance
                 if (is_malicious) {
                     transmit_tampered_message(target_ip, target_port, message);
                 } else {
                     transmit_secure_message(target_ip, target_port, message);
                 }
-            } 
-	    else if (strcmp(cmd, "tamper") == 0) {
-	    	printf("[Attacker] Starting payload injection with spoofed MAC...\n");
-	    	transmit_tampered_message(target_ip, target_port, message);
-	    }
-	    else {
-                printf("[Host] Unknown command. Use 'send' or 'tamper'.\n");
             }
-        } 
-	else if (strcmp(input_line, "benchmark") == 0) {
-		// Run the benchmark procedure for 1000 times
-		run_crypto_benchmark(global_eid); 
-	}
-	else {
-            printf("[Host] Invalid syntax. Example: send 127.0.0.1 8081 Hello!\n");
+            else if (strcmp(cmd, "tamper") == 0) {
+                printf("[Attacker] Injecting 1-bit flipped ciphertext to test AES-GCM tag verification...\n");
+                transmit_tampered_message(target_ip, target_port, message);
+            }
+            else {
+                printf("[Host] Unknown command. Use 'send', 'tamper', 'benchmark', or 'quit'.\n");
+            }
+        }
+        else if (strcmp(input_line, "benchmark") == 0) {
+            run_crypto_benchmark(global_eid);
+        }
+        else {
+            printf("[Host] Invalid syntax. Example: send 172.20.0.11 8080 Hello!\n");
         }
     }
 
