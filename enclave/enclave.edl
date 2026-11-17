@@ -3,28 +3,46 @@ enclave {
     include "sgx_report.h"
 
     trusted {
-        /* * ECDH Key Exchange Module
-         * Generates a local keypair and returns the public key to the host.
+        /*
+         * Exports the enclave's own sgx_target_info_t so a peer can bind
+         * an SGX Local Attestation Report specifically to this enclave.
          */
-        public void ecall_ecdh_generate_keypair([out] sgx_ec256_public_t* out_pub_key);
+        public sgx_status_t ecall_get_target_info(
+            [out] sgx_target_info_t* target_info
+        );
 
-        /* * Ingests the remote peer's public key and computes the ECDH shared secret.
-         * The secret never leaves the enclave boundary.
+        /*
+         * Generates an ephemeral NIST P-256 keypair inside EPC memory and binds
+         * the 64-byte public key (X || Y) into an SGX Report targeted at the peer.
          */
-        public void ecall_ecdh_derive_shared_secret([in] const sgx_ec256_public_t* remote_pub_key);
+        public sgx_status_t ecall_generate_attested_key(
+            [in] const sgx_target_info_t* p_peer_target_info,
+            [out] sgx_report_t* p_report
+        );
 
-        /* * Core P2P AES-GCM Telemetry 
+        /*
+         * Verifies the peer's SGX Report MAC (sgx_verify_report), checks MRSIGNER
+         * and MRENCLAVE, extracts report_data inside the enclave, and derives
+         * the AES-128 session key.
          */
-        public void ecall_encrypt_payload([in, string] const char* plaintext, [out, size=ciphertext_max_len] char* ciphertext_buffer, size_t ciphertext_max_len, [out] size_t* actual_ciphertext_len);
-        
-        public void ecall_decrypt_payload([in, size=ciphertext_len] const char* ciphertext_buffer, size_t ciphertext_len);
-	
-	/* * Remote Attestation Module: generates an ECDH keypair to an SGX Report
-	* and verifies incoming peer reports against expected enclave measurements. 
-	*/
-	public sgx_status_t ecall_generate_attestated_key([in] const sgx_target_info_t *p_qe_target_info, [out] sgx_report_t *p_report);
-	
-	public sgx_status_t ecall_verify_peer_report([in] const sgx_report_t *p_peer_report); 
+        public sgx_status_t ecall_verify_and_derive(
+            [in] const sgx_report_t* p_peer_report
+        );
+
+        /*
+         * Core P2P AES-GCM Telemetry (single-use ephemeral session key)
+         */
+        public sgx_status_t ecall_encrypt_payload(
+            [in, string] const char* plaintext,
+            [out, size=ciphertext_max_len] char* ciphertext_buffer,
+            size_t ciphertext_max_len,
+            [out] size_t* actual_ciphertext_len
+        );
+
+        public sgx_status_t ecall_decrypt_payload(
+            [in, size=ciphertext_len] const char* ciphertext_buffer,
+            size_t ciphertext_len
+        );
     };
 
     untrusted {

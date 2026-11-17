@@ -89,7 +89,8 @@ void run_crypto_benchmark(sgx_enclave_id_t eid) {
 		clock_gettime(CLOCK_MONOTONIC, &start);
 
 		// 2. Run ONLY cryptographyc operation inside the ENCLAVE
-		status = ecall_encrypt_payload(eid, test_payload, ciphertext_buffer, sizeof(ciphertext_buffer), &actual_crypto_len);		
+		sgx_status_t ecall_ret = SGX_SUCCESS;
+		status = ecall_encrypt_payload(eid, &ecall_ret, (const char*)test_payload, ciphertext_buffer, sizeof(ciphertext_buffer), &actual_crypto_len);		
 		
 		// 3. Capture the final timestamp
 		clock_gettime(CLOCK_MONOTONIC, &end);
