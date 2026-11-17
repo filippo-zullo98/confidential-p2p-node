@@ -26,7 +26,7 @@ else
 endif
 
 App_Include_Paths := -I$(SGX_SDK)/include -Inode
-App_C_Flags := $(SGX_COMMON_CFLAGS) -fPIC -Wno-attributes $(App_Include_Paths)
+App_C_Flags := $(SGX_COMMON_CFLAGS) -Wall -Wextra -fPIC -Wno-attributes $(App_Include_Paths)
 App_Link_Flags := $(SGX_COMMON_CFLAGS) -L$(SGX_LIBRARY_PATH) -l$(Urts_Library_Name) -lpthread
 
 ifneq ($(SGX_DEBUG), 1)
