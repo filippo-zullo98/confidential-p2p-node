@@ -1,76 +1,89 @@
-# Confidential P2P Node (Intel SGX)
+# Confidential P2P Node (`confidential-p2p-node`)
 
-A decentralized Peer-to-Peer (P2P) overlay network node leveraging **Intel SGX (Software Guard Extensions)** to implement a Zero-Trust architecture. 
+A proof-of-concept Peer-to-Peer (P2P) mesh node written in C using the **Intel SGX SDK** (`SGX_MODE=SIM`) to isolate key exchange, local attestation, and authenticated symmetric encryption inside a Trusted Execution Environment (TEE) boundary.
 
-This project was developed as part of a Bachelor's Thesis in Computer Science to evaluate the application of Confidential Computing in distributed systems, specifically focusing on mitigating "Insider Threats" (e.g., malicious raw socket injections) within a containerized environment.
+---
 
-## Core Features
+## Architecture & Security Model
 
-* **Hardware-Isolated Enclaves:** Core cryptographic operations and message validations are executed inside SGX enclaves to prevent memory inspection from the host OS.
-* **Secure Communication (AES-GCM):** Payload encryption and authentication using AES-GCM, ensuring data confidentiality and integrity.
-* **Key Exchange:** ECDH handshake implementation for secure ephemeral session key derivation.
-* **Robust Networking:** Custom TCP framing and strict port validation to handle packet fragmentation and unauthorized traffic.
-* **Threat Simulation:** Docker Compose orchestration to simulate a network of trusted nodes and a compromised host attempting to inject unauthorized raw traffic.
+* **Trusted Enclave (`enclave/`):**
+  * **Mutual SGX Local Attestation:** Peers exchange their `sgx_target_info_t` (`sgx_self_target`), generate an ephemeral NIST P-256 keypair inside the enclave, and bind the 64-byte uncompressed public key ($X \parallel Y$) into the `report_data` field of a peer-targeted `sgx_report_t` (`sgx_create_report`).
+  * **Cryptographic Report & Identity Verification:** Incoming reports are verified inside the enclave via `sgx_verify_report()` (validating the report CMAC) before checking `MRSIGNER` and `MRENCLAVE` measurements.
+  * **Single-Use Ephemeral ECDH & KDF:** Inside `ecall_verify_and_derive`, the enclave extracts the authenticated public key, computes the ECDH shared secret, derives a 128-bit AES key via SHA-256 truncation, and immediately scrubs both the ephemeral private key and the session key after a single encryption or decryption operation.
+  * **Authenticated Encryption:** Payloads are encrypted and authenticated using **AES-128-GCM** via the Intel SGX Trusted Cryptography Library (`sgx_tcrypto`).
+* **Untrusted Host (`node/`):**
+  * Manages TCP sockets, 4-byte length-prefixed framing (`htonl`/`ntohl` with `read_full`/`write_full` loops), strict TCP port validation (`1–65535` via `strtol`), and a `pthread_mutex` serializing enclave sessions.
+  * *Prototype Threat Model & Limitations:* In this interactive CLI prototype, plaintext messages enter from the untrusted host console (`[in, string]`) and decrypted payloads are printed via `ocall_print_string`. Moreover, the enclave runs in simulation mode (`SGX_MODE=SIM`) without a custom `Enclave.config.xml` (default debug signing configuration). Cross-host deployment on physical SGX hardware requires **Intel SGX DCAP** Quote generation and verification.
 
-## Architecture
+---
 
-The untrusted host process (```node/```) only ever see ciphertext; all key material and plaintext validation happen inside the SGX enclave (```enclave/```), so a compromised host process cannot forge or read 
-traffic without also breaking into the enclave itself.
-
-## Technologies & Stack
-
-* **Language:** C 
-* **Confidential Computing:** Intel SGX SDK (ECALLs / OCALLs, Edger8r)
-* **Cryptography:** OpenSSL (Intel SGX SSL / Crypto API)
-* **Infrastructure:** Docker, Docker Compose
-* **Build System:** GNU Make
-
-## Prerequisites
-
-To build and run the simulation, the host machine must support Intel SGX (Hardware or Simulation mode). The primary dependencies are:
-* Linux OS (Debian/Ubuntu Server recommended)
-* [Intel SGX SDK](https://github.com/intel/linux-sgx)
-* Docker & Docker Compose
-* OpenSSL
-
-## Build and Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone [https://github.com/filippo-zullo98/confidential-p2p-node.git](https://github.com/filippo-zullo98/confidential-p2p-node.git)
-   cd confidential-p2p-node
-   ```
-2. **Build the project:** The Makefile is configured to automatically generate the RSA private key (enclave_private.pem) required to sign the enclave if it is not present.
-   ```bash
-   make
-   ```
-## Running the simulation 
-The project includes a Docker Compose configuration to spin up the P2P network and simulate the Insider Threat scenario:
-  ```bash
-  # Build the Docker images and start the network in detached mode
-  docker-compose up --build -d
-      
-  # View the logs to observe the SGX enclave detecting and dropping unsigned packets
-  docker-compose logs -f
-  ```
 ## Repository Structure
-- ```enclave/``` - Trusted code executed inside the SGX enclave (cryptography, EDL file).
 
-- ```node/``` - Untrusted application code handling socket connections and P2P routing.
+```text
+confidential-p2p-node/
+├── enclave/
+│   ├── enclave.edl          # Enclave Definition Language interface (ECALLs / OCALLs)
+│   ├── enclave.c            # Trusted attestation, ECDH KDF, and AES-128-GCM routines
+│   └── Makefile             # Trusted enclave shared library build rules
+├── node/
+│   ├── main.c               # CLI loop, port validation, and multi-payload CSV benchmark
+│   ├── p2p_network.c        # TCP listener, length-prefixed framing, and attested handshake
+│   └── p2p_network.h        # Networking declarations and shared constants
+├── scripts/
+│   └── mitm_attack.py       # Active NIST P-256 MITM proxy for SGX report_data splicing tests
+├── Dockerfile               # Ubuntu 22.04 + Intel SGX SDK 2.22 build environment
+├── docker-compose.yml       # 7-node virtual P2P mesh (172.20.0.10 - 172.20.0.16)
+├── Makefile                 # Root build orchestration (sgx_edger8r, app, enclave.signed.so)
+└── benchmark_results.csv    # Raw latency samples (1,000 iterations per operation/payload)
+```
 
-- ```docker-compose.yml``` - Network orchestration and threat simulation setup.
+---
 
-- ```Makefile``` - Build instructions and automated enclave signing.
+## Quick Start (Docker Mesh)
 
-## Security Consideration & Known Limitations
-This project is a thesis-scale proof of concept, not a production-ready implementation.
-Being explicit about what it does *not* cover:
-- **No remote attestation:** the ECDH handshake currently establishes a session key between two enclaves whose identity is trusted implicitly. A production system would require SGX remote attestation (local or via Intel Attestation Service/DCAP) before the handshake, so each side can verify it is really talking to a genuine, unmodified enclave rather than compromised host impersonating one.
-- **Enclave signing key handling:** the enclave signing key (```enclave_private.pem```) is generated locally by the Makefile and is git-ignored; in a real deployment this key should be managed by an HSM Or a dedicated signing service, never kept on the build host.
-- **Threat model:** the simulated attacker is a compromised *host process* injecting or corrupting traffic at the network layer. Side-channel attacks against the enclave itself (e.g. speculative execution attacks like Foreshadow) are out of scope.
+### 1. Clone and Build
+```bash
+git clone https://github.com/filippo-zullo98/confidential-p2p-node.git
+cd confidential-p2p-node
+docker compose up --build -d
+```
 
-Documenting these gaps explicitly — rather than only the parts that work — is intentional: it mirrors how the design would be scrutinized in a real security review, and is discussed further in the thesis.
+### 2. Interactive Node Commands
+Attach to an honest node (e.g., `node_a` at `172.20.0.10`) while monitoring logs on `node_b` (`172.20.0.11`):
+```bash
+docker attach node_a
+```
+Available commands inside the `p2p-node>` prompt:
+* **Send an attested encrypted message:**
+  ```text
+  send 172.20.0.11 8080 Hello from node_a!
+  ```
+* **Test AES-128-GCM integrity (1-bit ciphertext flip in flight):**
+  ```text
+  tamper 172.20.0.11 8080 Tampered payload test
+  ```
+  *(Note: `node_c` at `172.20.0.12` is configured with `NODE_BEHAVIOR=MALICIOUS` and automatically performs bit-flipping on `send`.)*
+* **Run the cryptographic & handshake benchmark (exports `benchmark_results.csv`):**
+  ```text
+  benchmark
+  ```
+* **Exit cleanly:**
+  ```text
+  quit
+  ```
 
-## Author
+---
 
-- Filippo Zullo - [filippo-zullo98](https://github.com/filippo-zullo98/)
+## Running the Active MITM Test (`scripts/mitm_attack.py`)
+
+To verify that `sgx_verify_report()` blocks active Man-In-The-Middle key substitution in `report_data` (offset `320..383`):
+
+1. Start the MITM proxy on `node_c` (`172.20.0.12:9090` forwarding to `172.20.0.11:8080`):
+   ```bash
+   docker exec -it node_c python3 /app/scripts/mitm_attack.py --listen-port 9090 --target-ip 172.20.0.11 --target-port 8080
+   ```
+2. From `node_a`, route a message through the proxy:
+   ```text
+   send 172.20.0.12 9090 Confidential test message
+   ```
+3. Both endpoints reject the forged `sgx_report_t` with `SGX_ERROR_MAC_MISMATCH` (`0x3001`) and close the socket before any payload is transmitted.
